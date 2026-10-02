@@ -16,10 +16,16 @@ const KINDS = [FREE, ROAD, TAKEN];
 
 const C_OUTSIDE = '#0e1014';
 const C_FREE = '#d9d9d4';
-const C_ROAD = '#7d8794';
+const C_ROAD = '#6b7684';
 const C_TAKEN = '#23262e';
-const C_GRID = 'rgba(0,0,0,0.10)';
+// Сетка рисуется на любом зуме, иначе на стартовом поле клетку не видно вовсе, а «рисовать по
+// клеткам» без видимой клетки невозможно. Два уровня: частая и через GRID_EVERY — по ней считают.
+const C_GRID = 'rgba(0,0,0,0.26)';
+const C_GRID_MAJOR = 'rgba(0,0,0,0.50)';
 const C_EDGE = '#5a616e';
+const C_HOVER = '#e8b64c';
+const C_HOVER_ERASE = '#c96a6a';
+const GRID_EVERY = 8;
 
 const view = document.getElementById('view');
 const ctx = view.getContext('2d');
@@ -29,6 +35,18 @@ const nameInput = document.getElementById('name');
 const fileInput = document.getElementById('file');
 const saveBtn = document.getElementById('save');
 const openBtn = document.getElementById('open');
+const presetSel = document.getElementById('preset');
+const fieldW = document.getElementById('fieldW');
+const fieldH = document.getElementById('fieldH');
+const zoomInBtn = document.getElementById('zoomIn');
+const zoomOutBtn = document.getElementById('zoomOut');
+const fitBtn = document.getElementById('fitBtn');
+const stSize = document.getElementById('stSize');
+const stCell = document.getElementById('stCell');
+const stBrush = document.getElementById('stBrush');
+const stZoom = document.getElementById('stZoom');
+const KIND_TITLE = ['Свободно', 'Дорога', 'Занято'];
+const PRESETS = new Set(['96x96', '96x64', '64x96', '64x64', '48x48', '32x32']);
 
 let width = MAX_SIDE;
 let height = MAX_SIDE;
@@ -47,6 +65,7 @@ let stroking = false;
 let panning = false;
 let spaceDown = false;
 let strokeValue = FREE;
+let hover = null;
 let lastX = 0;
 let lastY = 0;
 let panX = 0;
@@ -120,10 +139,16 @@ function resize() {
   dpr = window.devicePixelRatio || 1;
   viewW = window.innerWidth;
   viewH = window.innerHeight;
+  // Буфер канваса живёт в пикселях устройства, а его размер на странице — в CSS-пикселях. Без
+  // второй строки при масштабе 125% канвас 1600 px шириной ложится в окно 1280: поле уезжает
+  // вправо и за нижний край, а попадание курсора считается в других координатах, чем рисунок.
   view.width = Math.round(viewW * dpr);
   view.height = Math.round(viewH * dpr);
+  view.style.width = viewW + 'px';
+  view.style.height = viewH + 'px';
   minScale = fitScale();
   if (scale < minScale) fit();
+  draw();
 }
 
 function zoomAt(px, py, target) {
@@ -183,33 +208,109 @@ function draw() {
     }
   }
 
-  if (scale >= 10) {
-    ctx.strokeStyle = C_GRID;
+  // Сетка всегда, а не от 10 пикселей на клетку: на стартовом зуме клетка 7 пикселей, и без
+  // линий поле выглядит пустым квадратом, в котором не видно, куда попадёт клик.
+  const x0 = Math.round(tx);
+  const y0 = Math.round(ty);
+  const x1 = Math.round(tx + width * scale);
+  const y1 = Math.round(ty + height * scale);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = 1; x < width; x++) {
+    if (x % GRID_EVERY === 0) continue;
+    const px = Math.round(tx + x * scale) + 0.5;
+    ctx.moveTo(px, y0);
+    ctx.lineTo(px, y1);
+  }
+  for (let y = 1; y < height; y++) {
+    if (y % GRID_EVERY === 0) continue;
+    const py = Math.round(ty + y * scale) + 0.5;
+    ctx.moveTo(x0, py);
+    ctx.lineTo(x1, py);
+  }
+  ctx.strokeStyle = C_GRID;
+  ctx.stroke();
+
+  ctx.beginPath();
+  for (let x = GRID_EVERY; x < width; x += GRID_EVERY) {
+    const px = Math.round(tx + x * scale) + 0.5;
+    ctx.moveTo(px, y0);
+    ctx.lineTo(px, y1);
+  }
+  for (let y = GRID_EVERY; y < height; y += GRID_EVERY) {
+    const py = Math.round(ty + y * scale) + 0.5;
+    ctx.moveTo(x0, py);
+    ctx.lineTo(x1, py);
+  }
+  ctx.strokeStyle = C_GRID_MAJOR;
+  ctx.stroke();
+
+  // Рамка клетки под курсором: единственное, что отвечает на вопрос «куда я попал».
+  if (hover) {
+    const hx = Math.round(tx + hover.x * scale);
+    const hy = Math.round(ty + hover.y * scale);
+    const hw = Math.max(2, Math.round(tx + (hover.x + 1) * scale) - hx);
+    const hh = Math.max(2, Math.round(ty + (hover.y + 1) * scale) - hy);
+    ctx.strokeStyle = strokeValue === FREE && !stroking ? C_HOVER_ERASE : C_HOVER;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(hx + 1, hy + 1, hw - 2, hh - 2);
     ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let x = 1; x < width; x++) {
-      const px = Math.round(tx + x * scale);
-      ctx.moveTo(px, Math.round(ty));
-      ctx.lineTo(px, Math.round(ty + height * scale));
-    }
-    for (let y = 1; y < height; y++) {
-      const py = Math.round(ty + y * scale);
-      ctx.moveTo(Math.round(tx), py);
-      ctx.lineTo(Math.round(tx + width * scale), py);
-    }
-    ctx.stroke();
   }
 
   ctx.strokeStyle = C_EDGE;
   ctx.lineWidth = 2;
-  ctx.strokeRect(Math.round(tx), Math.round(ty),
-    Math.round(tx + width * scale) - Math.round(tx),
-    Math.round(ty + height * scale) - Math.round(ty));
+  ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
 }
 
 function pushHistory() {
   history.push(grid.slice());
   if (history.length > HISTORY_LIMIT) history.shift();
+}
+
+// Смена размера не выбрасывает нарисованное: содержимое общего угла переносится, новое до свободно.
+// Молчаливая потеря карты здесь стоила бы дороже, чем «неожиданно» пустые новые клетки.
+function resizeField(w, h) {
+  if (!Number.isInteger(w) || !Number.isInteger(h) || w < MIN_SIDE || h < MIN_SIDE ||
+      w > MAX_SIDE || h > MAX_SIDE) return false;
+  if (w === width && h === height) return true;
+  pushHistory();
+  const next = newField(w, h);
+  const copyW = Math.min(w, width);
+  const copyH = Math.min(h, height);
+  for (let y = 0; y < copyH; y++) {
+    const from = y * width;
+    const to = y * w;
+    for (let x = 0; x < copyW; x++) next[to + x] = grid[from + x];
+  }
+  width = w;
+  height = h;
+  grid = next;
+  hover = null;
+  syncSizeInputs();
+  fit();
+  draw();
+  return true;
+}
+
+function syncSizeInputs() {
+  fieldW.value = String(width);
+  fieldH.value = String(height);
+  stSize.textContent = width + ' × ' + height;
+}
+
+function readSizeInputs() {
+  const w = parseInt(fieldW.value, 10);
+  const h = parseInt(fieldH.value, 10);
+  if (!resizeField(w, h)) {
+    fieldW.value = String(width);
+    fieldH.value = String(height);
+  }
+}
+
+function updateStatus() {
+  stCell.textContent = hover ? hover.x + ', ' + hover.y : '—';
+  stBrush.textContent = KIND_TITLE[KINDS.indexOf(brush)];
+  stZoom.textContent = (scale / minScale).toFixed(2) + '×';
 }
 
 function undo() {
@@ -301,7 +402,12 @@ async function openFile(file) {
   height = map.height;
   grid = map.grid;
   history = [];
+  hover = null;
   nameInput.value = map.name;
+  presetSel.value = (width === height && PRESETS.has(width + 'x' + height)) ? width + 'x' + height : 'custom';
+  syncSizeInputs();
+  fit();
+  updateStatus();
   draw();
 }
 
@@ -336,8 +442,16 @@ window.addEventListener('mousemove', (e) => {
     draw();
     return;
   }
-  if (!stroking) return;
   const c = cellAt(e.clientX, e.clientY);
+  const moved = !c !== !hover || (c && hover && (c.x !== hover.x || c.y !== hover.y));
+  if (moved) {
+    hover = c;
+    updateStatus();
+  }
+  if (!stroking) {
+    if (moved) draw();
+    return;
+  }
   if (!c || (c.x === lastX && c.y === lastY)) return;
   strokeLine(lastX, lastY, c.x, c.y);
   lastX = c.x;
@@ -354,6 +468,14 @@ window.addEventListener('blur', () => {
   spaceDown = false;
   stroking = false;
   panning = false;
+});
+
+// Курсор уходит с поля — рамка исчезает, иначе она остаётся висеть на последней клетке.
+view.addEventListener('mouseleave', () => {
+  if (hover === null) return;
+  hover = null;
+  updateStatus();
+  draw();
 });
 
 view.addEventListener('wheel', (e) => {
@@ -377,7 +499,15 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   const i = '123'.indexOf(e.key);
-  if (i !== -1) setBrush(KINDS[i]);
+  if (i !== -1) {
+    setBrush(KINDS[i]);
+    return;
+  }
+  if (e.key === '0') {
+    fit();
+    draw();
+    updateStatus();
+  }
 });
 
 window.addEventListener('keyup', (e) => {
@@ -388,6 +518,42 @@ window.addEventListener('resize', resize);
 
 saveBtn.addEventListener('click', save);
 openBtn.addEventListener('click', () => fileInput.click());
+
+// Размер поля: набор готовых и два числа для своего. Прямое число выигрывает у выбранного
+// пресета, поэтому пресет переходит в «свой» сам, а не молча затирает введённое.
+presetSel.addEventListener('change', () => {
+  const v = presetSel.value;
+  if (v === 'custom') {
+    fieldW.focus();
+    fieldW.select();
+    return;
+  }
+  const [w, h] = v.split('x').map(Number);
+  if (resizeField(w, h)) syncSizeInputs();
+});
+
+fieldW.addEventListener('change', () => {
+  presetSel.value = 'custom';
+  readSizeInputs();
+});
+fieldH.addEventListener('change', () => {
+  presetSel.value = 'custom';
+  readSizeInputs();
+});
+
+zoomInBtn.addEventListener('click', () => {
+  zoomAt(viewW / 2, viewH / 2, scale * 1.4);
+  updateStatus();
+});
+zoomOutBtn.addEventListener('click', () => {
+  zoomAt(viewW / 2, viewH / 2, scale / 1.4);
+  updateStatus();
+});
+fitBtn.addEventListener('click', () => {
+  fit();
+  draw();
+  updateStatus();
+});
 
 fileInput.addEventListener('change', async () => {
   const file = fileInput.files && fileInput.files[0];
@@ -406,4 +572,6 @@ resize();
 buildBrushes();
 fit();
 setBrush(ROAD);
+syncSizeInputs();
+updateStatus();
 draw();

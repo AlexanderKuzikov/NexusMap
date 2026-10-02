@@ -84,17 +84,128 @@
     -webkit-user-select: text;
     user-select: text;
   }
+  #bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .row > label {
+    color: #8b94a3;
+    font-size: 12px;
+  }
+  select, input[type="number"] {
+    padding: 6px 8px;
+    background: #161a22;
+    color: #d9d9d4;
+    border: 1px solid #39414f;
+    border-radius: 8px;
+    font: inherit;
+  }
+  input[type="number"] {
+    width: 66px;
+    -moz-appearance: textfield;
+  }
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .zoom {
+    width: 34px;
+    font-size: 16px;
+    line-height: 1;
+    padding: 6px 0;
+  }
+  #status {
+    position: fixed;
+    left: 12px;
+    bottom: 12px;
+    display: flex;
+    gap: 14px;
+    padding: 8px 12px;
+    background: rgba(16, 18, 24, 0.94);
+    border: 1px solid #2f3743;
+    border-radius: 10px;
+    color: #b9c1cd;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  #status b {
+    color: #e6e9ee;
+    font-weight: 600;
+  }
+  #legend {
+    position: fixed;
+    right: 12px;
+    bottom: 12px;
+    max-width: 46vw;
+    padding: 8px 12px;
+    background: rgba(16, 18, 24, 0.94);
+    border: 1px solid #2f3743;
+    border-radius: 10px;
+    color: #8b94a3;
+    font-size: 12px;
+    text-align: right;
+  }
+  #legend kbd {
+    color: #d9d9d4;
+    background: #232833;
+    border: 1px solid #39414f;
+    border-radius: 4px;
+    padding: 0 4px;
+    font: inherit;
+  }
 </style>
 </head>
 <body>
 <canvas id="view"></canvas>
 
 <div id="bar">
-  <div id="brushes"></div>
-  <input id="name" type="text" value="burrow-01" spellcheck="false" autocomplete="off" aria-label="Название карты">
-  <button id="save" class="cmd" type="button">Сохранить</button>
-  <button id="open" class="cmd" type="button">Открыть</button>
-  <input id="file" type="file" accept=".json,application/json" hidden>
+  <div class="row">
+    <div id="brushes"></div>
+    <input id="name" type="text" value="burrow-01" spellcheck="false" autocomplete="off" aria-label="Название карты">
+    <button id="save" class="cmd" type="button">Сохранить</button>
+    <button id="open" class="cmd" type="button">Открыть</button>
+    <input id="file" type="file" accept=".json,application/json" hidden>
+  </div>
+  <div class="row">
+    <label for="preset">Размер</label>
+    <select id="preset" aria-label="Размер поля">
+      <option value="96x96">96 × 96</option>
+      <option value="96x64">96 × 64</option>
+      <option value="64x96">64 × 96</option>
+      <option value="64x64">64 × 64</option>
+      <option value="48x48">48 × 48</option>
+      <option value="32x32">32 × 32</option>
+      <option value="custom">свой…</option>
+    </select>
+    <input id="fieldW" type="number" min="8" max="96" step="1" value="96" aria-label="Ширина поля">
+    <input id="fieldH" type="number" min="8" max="96" step="1" value="96" aria-label="Высота поля">
+    <span class="row" style="gap:4px">
+      <button id="zoomOut" class="cmd zoom" type="button" aria-label="Отдалить">−</button>
+      <button id="zoomIn" class="cmd zoom" type="button" aria-label="Приблизить">+</button>
+      <button id="fitBtn" class="cmd" type="button">Вписать</button>
+    </span>
+  </div>
+</div>
+
+<div id="status">
+  <span>Поле <b id="stSize">96 × 96</b></span>
+  <span>Клетка <b id="stCell">—</b></span>
+  <span>Кисть <b id="stBrush">Дорога</b></span>
+  <span>Масштаб <b id="stZoom">—</b></span>
+</div>
+
+<div id="legend">
+  <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> вид клетки ·
+  <kbd>левая</kbd> рисовать · <kbd>правая</kbd> стирать ·
+  <kbd>колесо</kbd> зум · <kbd>средняя</kbd> или <kbd>пробел</kbd> сдвиг · <kbd>Ctrl+Z</kbd> отмена
 </div>
 
 <script src="editor.js"></script>
