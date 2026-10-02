@@ -6,6 +6,8 @@ const MAX_ZOOM = 32;
 const MARGIN = 12;
 const HISTORY_LIMIT = 50;
 const SWATCH = 40;
+const MIN_BRUSH_W = 1;
+const MAX_BRUSH_W = 16;
 
 // Символ клетки и символ в файле — одно и то же поле: клетка хранит код символа.
 // Таблицы «тип → символ» не существует, поэтому разойтись с файлом она не может.
@@ -38,12 +40,17 @@ const openBtn = document.getElementById('open');
 const presetSel = document.getElementById('preset');
 const fieldW = document.getElementById('fieldW');
 const fieldH = document.getElementById('fieldH');
+const stage = document.getElementById('stage');
+const brushWInput = document.getElementById('brushW');
+const brushUpBtn = document.getElementById('brushUp');
+const brushDownBtn = document.getElementById('brushDown');
 const zoomInBtn = document.getElementById('zoomIn');
 const zoomOutBtn = document.getElementById('zoomOut');
 const fitBtn = document.getElementById('fitBtn');
 const stSize = document.getElementById('stSize');
 const stCell = document.getElementById('stCell');
 const stBrush = document.getElementById('stBrush');
+const stBrushW = document.getElementById('stBrushW');
 const stZoom = document.getElementById('stZoom');
 const KIND_TITLE = ['Свободно', 'Дорога', 'Занято'];
 const PRESETS = new Set(['96x96', '96x64', '64x96', '64x64', '48x48', '32x32']);
@@ -66,6 +73,7 @@ let panning = false;
 let spaceDown = false;
 let strokeValue = FREE;
 let hover = null;
+let brushW = 1;
 let lastX = 0;
 let lastY = 0;
 let panX = 0;
@@ -121,26 +129,25 @@ function setBrush(code) {
 }
 
 function fitScale() {
-  const availW = viewW - 2 * MARGIN;
-  const availH = viewH - bar.offsetHeight - 2 * MARGIN;
-  return Math.max(1, Math.min(MAX_ZOOM, availW / width, availH / height));
+  return Math.max(1, Math.min(MAX_ZOOM, (viewW - 2 * MARGIN) / width, (viewH - 2 * MARGIN) / height));
 }
 
 function fit() {
-  const availW = viewW;
-  const availH = viewH - bar.offsetHeight;
   scale = fitScale();
   minScale = scale;
-  tx = (availW - width * scale) / 2;
-  ty = bar.offsetHeight + (availH - height * scale) / 2;
+  tx = (viewW - width * scale) / 2;
+  ty = (viewH - height * scale) / 2;
 }
 
 function resize() {
   dpr = window.devicePixelRatio || 1;
-  viewW = window.innerWidth;
-  viewH = window.innerHeight;
+  // Размер берётся у сцены, а не у окна: сцена уже вычитает из себя панели, и поле поэтому
+  // всегда помещается в видимую часть и никогда не лезет под панель.
+  const box = stage.getBoundingClientRect();
+  viewW = Math.max(1, Math.round(box.width));
+  viewH = Math.max(1, Math.round(box.height));
   // Буфер канваса живёт в пикселях устройства, а его размер на странице — в CSS-пикселях. Без
-  // второй строки при масштабе 125% канвас 1600 px шириной ложится в окно 1280: поле уезжает
+  // второй строки при масштабе 125% канвас 1600 px шириной ложится в сцену 1280: поле уезжает
   // вправо и за нижний край, а попадание курсора считается в других координатах, чем рисунок.
   view.width = Math.round(viewW * dpr);
   view.height = Math.round(viewH * dpr);
@@ -170,8 +177,27 @@ function cellAt(px, py) {
 }
 
 function paint(x, y) {
-  if (x < 0 || y < 0 || x >= width || y >= height) return;
-  grid[y * width + x] = strokeValue;
+  // Полотно красится квадратом со стороной brushW, а не одной клеткой: восемь клеток дороги
+  // иначе приходится выкладывать вручную. Нечётная толщина делится поровну, чётная уходит
+  // целиком вправо и вниз — иначе линия полосы уезжает на полклетки от края до края.
+  const before = Math.floor((brushW - 1) / 2);
+  const after = brushW - 1 - before;
+  for (let dy = -before; dy <= after; dy++) {
+    const row = y + dy;
+    if (row < 0 || row >= height) continue;
+    for (let dx = -before; dx <= after; dx++) {
+      const col = x + dx;
+      if (col < 0 || col >= width) continue;
+      grid[row * width + col] = strokeValue;
+    }
+  }
+}
+
+function setBrushW(w) {
+  const next = Math.max(MIN_BRUSH_W, Math.min(MAX_BRUSH_W, Math.round(w) || 1));
+  brushW = next;
+  brushWInput.value = String(next);
+  stBrushW.textContent = String(next);
 }
 
 // Шагов столько же, сколько клеток на длинном плече отрезка, поэтому на быстром движении
@@ -507,7 +533,11 @@ window.addEventListener('keydown', (e) => {
     fit();
     draw();
     updateStatus();
+    return;
   }
+  // Ширина кисти на скобках: она меняется часто, а мышью до поля не дотянуться.
+  if (e.key === '[') setBrushW(brushW - 1);
+  if (e.key === ']') setBrushW(brushW + 1);
 });
 
 window.addEventListener('keyup', (e) => {
@@ -555,6 +585,10 @@ fitBtn.addEventListener('click', () => {
   updateStatus();
 });
 
+brushWInput.addEventListener('change', () => setBrushW(parseInt(brushWInput.value, 10)));
+brushUpBtn.addEventListener('click', () => setBrushW(brushW + 1));
+brushDownBtn.addEventListener('click', () => setBrushW(brushW - 1));
+
 fileInput.addEventListener('change', async () => {
   const file = fileInput.files && fileInput.files[0];
   fileInput.value = '';
@@ -572,6 +606,7 @@ resize();
 buildBrushes();
 fit();
 setBrush(ROAD);
+setBrushW(1);
 syncSizeInputs();
 updateStatus();
 draw();
