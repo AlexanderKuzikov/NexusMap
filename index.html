@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>NexusMap — редактор карт</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #0e1014;
+  }
+  body {
+    font: 13px/1.4 system-ui, "Segoe UI", sans-serif;
+    color: #d9d9d4;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  canvas#view {
+    position: fixed;
+    inset: 0;
+    display: block;
+  }
+  #bar {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    background: rgba(16, 18, 24, 0.94);
+    border: 1px solid #2f3743;
+    border-radius: 12px;
+  }
+  #brushes {
+    display: flex;
+    gap: 6px;
+  }
+  .brush {
+    width: 60px;
+    height: 60px;
+    padding: 0;
+    display: grid;
+    place-items: center;
+    background: #232833;
+    border: 1px solid #39414f;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  .brush:hover {
+    background: #2a303c;
+  }
+  .brush[aria-pressed="true"] {
+    background: #2f3644;
+    box-shadow: inset 0 0 0 2px #9aa4b2;
+  }
+  .brush:focus-visible,
+  .cmd:focus-visible,
+  #name:focus-visible {
+    outline: 2px solid #6f9bff;
+    outline-offset: 1px;
+  }
+  .cmd {
+    padding: 8px 12px;
+    background: #2a3040;
+    color: #d9d9d4;
+    border: 1px solid #39414f;
+    border-radius: 8px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .cmd:hover {
+    background: #333b4d;
+  }
+  #name {
+    width: 120px;
+    padding: 7px 9px;
+    background: #161a22;
+    color: #d9d9d4;
+    border: 1px solid #39414f;
+    border-radius: 8px;
+    font: inherit;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="bar">
+  <div id="brushes"></div>
+  <input id="name" type="text" value="burrow-01" spellcheck="false" autocomplete="off" aria-label="Название карты">
+  <button id="save" class="cmd" type="button">Сохранить</button>
+  <button id="open" class="cmd" type="button">Открыть</button>
+  <input id="file" type="file" accept=".json,application/json" hidden>
+</div>
+
+<script src="editor.js"></script>
+</body>
+</html>
