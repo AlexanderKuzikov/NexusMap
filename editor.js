@@ -8,6 +8,10 @@ const HISTORY_LIMIT = 50;
 const SWATCH = 40;
 const MIN_BRUSH_W = 1;
 const MAX_BRUSH_W = 16;
+// Линейки занимают свои ячейки сетки, и все размеры считаются от сцены: у канваса есть собственный
+// размер 300 на 150, и если мерить линейки по нему же, сетка расползается, а поле уезжает.
+const RULER_X_H = 24;
+const RULER_Y_W = 40;
 
 // Символ клетки и символ в файле — одно и то же поле: клетка хранит код символа.
 // Таблицы «тип → символ» не существует, поэтому разойтись с файлом она не может.
@@ -26,7 +30,10 @@ const C_GRID = 'rgba(0,0,0,0.26)';
 const C_GRID_MAJOR = 'rgba(0,0,0,0.50)';
 const C_EDGE = '#5a616e';
 const C_HOVER = '#e8b64c';
-const C_HOVER_ERASE = '#c96a6a';
+const C_RULER_BG = '#12151c';
+const C_RULER_TICK = '#4a5566';
+const C_RULER_TICK_MINOR = '#2a3140';
+const C_RULER_TEXT = '#9aa4b2';
 const GRID_EVERY = 8;
 
 const view = document.getElementById('view');
@@ -41,6 +48,10 @@ const presetSel = document.getElementById('preset');
 const fieldW = document.getElementById('fieldW');
 const fieldH = document.getElementById('fieldH');
 const stage = document.getElementById('stage');
+const rulerX = document.getElementById('rulerX');
+const rulerY = document.getElementById('rulerY');
+const rxCtx = rulerX.getContext('2d');
+const ryCtx = rulerY.getContext('2d');
 const brushWInput = document.getElementById('brushW');
 const brushUpBtn = document.getElementById('brushUp');
 const brushDownBtn = document.getElementById('brushDown');
@@ -65,6 +76,10 @@ let viewW = 0;
 let viewH = 0;
 let viewLeft = 0;
 let viewTop = 0;
+let rxW = 0;
+let rxH = 0;
+let ryW = 0;
+let ryH = 0;
 let dpr = 1;
 let scale = 1;
 let minScale = 1;
@@ -152,8 +167,14 @@ function resize() {
   // Размер берётся у сцены, а не у окна: сцена уже вычитает из себя панели, и поле поэтому
   // всегда помещается в видимую часть и никогда не лезет под панель.
   const box = stage.getBoundingClientRect();
-  viewW = Math.max(1, Math.round(stage.clientWidth));
-  viewH = Math.max(1, Math.round(stage.clientHeight));
+  const stageW = Math.max(RULER_Y_W + 1, Math.round(stage.clientWidth));
+  const stageH = Math.max(RULER_X_H + 1, Math.round(stage.clientHeight));
+  rxW = stageW - RULER_Y_W;
+  rxH = RULER_X_H;
+  ryW = RULER_Y_W;
+  ryH = stageH - RULER_X_H;
+  viewW = rxW;
+  viewH = ryH;
   // Буфер канваса живёт в пикселях устройства, а его размер на странице — в CSS-пикселях. Без
   // второй строки при масштабе 125% канвас 1600 px шириной ложится в сцену 1280: поле уезжает
   // вправо и за нижний край, а попадание курсора считается в других координатах, чем рисунок.
@@ -161,11 +182,19 @@ function resize() {
   view.height = Math.round(viewH * dpr);
   view.style.width = viewW + 'px';
   view.style.height = viewH + 'px';
+  rulerX.width = Math.round(rxW * dpr);
+  rulerX.height = Math.round(rxH * dpr);
+  rulerX.style.width = rxW + 'px';
+  rulerX.style.height = rxH + 'px';
+  rulerY.width = Math.round(ryW * dpr);
+  rulerY.height = Math.round(ryH * dpr);
+  rulerY.style.width = ryW + 'px';
+  rulerY.style.height = ryH + 'px';
   // События мыши приходят в координатах окна, а tx и ty живут в координатах канваса. После того
   // как канвас переехал из угла окна в сцену между панелями, разница стала равна высоте панели —
   // это и был сдвиг клика на десяток клеток вниз.
-  viewLeft = box.left;
-  viewTop = box.top;
+  viewLeft = box.left + RULER_Y_W;
+  viewTop = box.top + RULER_X_H;
   minScale = fitScale();
   // Поле центрируется по сцене, поэтому её размер нельзя запоминать: если сцена стала ниже, а
   // пользователь не зумил, поле обязано вписаться заново. Прежнее условие «зум меньше минимального»
@@ -318,21 +347,88 @@ function draw() {
   ctx.strokeStyle = C_GRID_MAJOR;
   ctx.stroke();
 
-  // Рамка клетки под курсором: единственное, что отвечает на вопрос «куда я попал».
-  if (hover) {
-    const hx = Math.round(tx + hover.x * scale);
-    const hy = Math.round(ty + hover.y * scale);
-    const hw = Math.max(2, Math.round(tx + (hover.x + 1) * scale) - hx);
-    const hh = Math.max(2, Math.round(ty + (hover.y + 1) * scale) - hy);
-    ctx.strokeStyle = strokeValue === FREE && !stroking ? C_HOVER_ERASE : C_HOVER;
+  // Рамка показывает не клетку под курсором, а тот квадрат, который будет закрашен: при кисти 8
+  // одна клетка вводит в заблуждение и рисуешь вслепую.
+  if (hover && tool === 'paint' && !spaceDown) {
+    const before = Math.floor((brushW - 1) / 2);
+    const after = brushW - 1 - before;
+    const hx = Math.round(tx + (hover.x - before) * scale);
+    const hy = Math.round(ty + (hover.y - before) * scale);
+    const hw = Math.max(2, Math.round(tx + (hover.x + after + 1) * scale) - hx);
+    const hh = Math.max(2, Math.round(ty + (hover.y + after + 1) * scale) - hy);
+    ctx.strokeStyle = C_HOVER;
     ctx.lineWidth = 2;
     ctx.strokeRect(hx + 1, hy + 1, hw - 2, hh - 2);
     ctx.lineWidth = 1;
   }
 
+  drawRulers();
+
   ctx.strokeStyle = C_EDGE;
   ctx.lineWidth = 2;
   ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+}
+
+// Подписи линеек идут с шагом, который на текущем зуме даёт примерно 60 пикселей между числами:
+// на мелком зуме частая сетка сливается в кашу, а на крупном подпись через клетку не влезает.
+function rulerStep() {
+  for (const s of [1, 2, 5, 10, 20, 50]) {
+    if (s * scale >= 60) return s;
+  }
+  return 100;
+}
+
+function drawRulers() {
+  const step = rulerStep();
+  const font = '11px system-ui, "Segoe UI", sans-serif';
+  const left = Math.round(tx);
+  const top = Math.round(ty);
+
+  rxCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  rxCtx.fillStyle = C_RULER_BG;
+  rxCtx.fillRect(0, 0, rxW, rxH);
+  rxCtx.font = font;
+  rxCtx.textBaseline = 'middle';
+  rxCtx.textAlign = 'center';
+  for (let c = 0; c <= width; c++) {
+    const px = Math.round(c * scale);
+    const sx = Math.round(tx + px);
+    if (sx < -30 || sx > rxW + 30) continue;
+    const major = c % step === 0;
+    rxCtx.strokeStyle = major ? C_RULER_TICK : C_RULER_TICK_MINOR;
+    rxCtx.lineWidth = 1;
+    rxCtx.beginPath();
+    rxCtx.moveTo(sx + 0.5, rxH - (major ? 11 : 5));
+    rxCtx.lineTo(sx + 0.5, rxH);
+    rxCtx.stroke();
+    if (major) {
+      rxCtx.fillStyle = C_RULER_TEXT;
+      rxCtx.fillText(String(c), Math.min(Math.max(sx, 12), rxW - 12), rxH / 2 - 1);
+    }
+  }
+
+  ryCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ryCtx.fillStyle = C_RULER_BG;
+  ryCtx.fillRect(0, 0, ryW, ryH);
+  ryCtx.font = font;
+  ryCtx.textBaseline = 'middle';
+  ryCtx.textAlign = 'right';
+  for (let r = 0; r <= height; r++) {
+    const py = Math.round(r * scale);
+    const sy = Math.round(ty + py);
+    if (sy < -30 || sy > ryH + 30) continue;
+    const major = r % step === 0;
+    ryCtx.strokeStyle = major ? C_RULER_TICK : C_RULER_TICK_MINOR;
+    ryCtx.lineWidth = 1;
+    ryCtx.beginPath();
+    ryCtx.moveTo(ryW - (major ? 11 : 5), sy + 0.5);
+    ryCtx.lineTo(ryW, sy + 0.5);
+    ryCtx.stroke();
+    if (major) {
+      ryCtx.fillStyle = C_RULER_TEXT;
+      ryCtx.fillText(String(r), ryW - 15, Math.min(Math.max(sy, 8), ryH - 8));
+    }
+  }
 }
 
 function pushHistory() {
@@ -487,7 +583,9 @@ async function openFile(file) {
 
 view.addEventListener('mousedown', (e) => {
   e.preventDefault();
-  if (e.button === 1 || (e.button === 0 && (spaceDown || tool === 'pan'))) {
+  // Правая кнопка двигает карту: так ведут себя все нормальные редакторы, а стирать полосой
+  // нужной толщины удобнее кистью «Свободно» — она уже рисует ровно то же самое.
+  if (e.button === 1 || e.button === 2 || (e.button === 0 && (spaceDown || tool === 'pan'))) {
     panning = true;
     panX = e.clientX;
     panY = e.clientY;
@@ -496,12 +594,12 @@ view.addEventListener('mousedown', (e) => {
     view.style.cursor = 'grabbing';
     return;
   }
-  if (e.button !== 0 && e.button !== 2) return;
+  if (e.button !== 0) return;
   const c = cellAt(toCanvasX(e.clientX), toCanvasY(e.clientY));
   if (!c) return;
   pushHistory();
   stroking = true;
-  strokeValue = e.button === 2 ? FREE : brush;
+  strokeValue = brush;
   lastX = c.x;
   lastY = c.y;
   paint(c.x, c.y);

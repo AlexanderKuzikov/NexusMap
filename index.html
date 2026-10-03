@@ -21,15 +21,27 @@
     flex-direction: column;
   }
   canvas#view {
-    position: absolute;
-    inset: 0;
     display: block;
   }
   #stage {
     position: relative;
     flex: 1 1 auto;
     min-height: 0;
+    display: grid;
+    grid-template-columns: 40px 1fr;
+    grid-template-rows: 24px 1fr;
   }
+  #rulerCorner {
+    grid-area: 1 / 1;
+    background: #12151c;
+    border-right: 1px solid #2f3743;
+    border-bottom: 1px solid #2f3743;
+  }
+  /* Канвас имеет собственный размер 300 на 150, и без этого он распирает ячейку сетки. */
+  #rulerX, #rulerY, canvas#view { min-width: 0; min-height: 0; }
+  #rulerX { grid-area: 1 / 2; }
+  #rulerY { grid-area: 2 / 1; }
+  canvas#view { grid-area: 2 / 2; display: block; }
   #footer {
     flex: 0 0 auto;
     display: flex;
@@ -208,7 +220,12 @@
   </div>
 </div>
 
-<div id="stage"><canvas id="view"></canvas></div>
+<div id="stage">
+      <div id="rulerCorner"></div>
+      <canvas id="rulerX"></canvas>
+      <canvas id="rulerY"></canvas>
+      <canvas id="view"></canvas>
+    </div>
 
 <div id="footer">
   <div id="status">
@@ -218,10 +235,11 @@
     <span>Масштаб <b id="stZoom">—</b></span>
   </div>
   <div id="legend">
-    <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> вид клетки · <kbd>4</kbd> или <kbd>пробел</kbd> сдвиг ·
+    <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> вид клетки · <kbd>1</kbd> стирает полосой ·
+    <kbd>4</kbd> инструмент сдвига ·
     <kbd>[</kbd> <kbd>]</kbd> ширина кисти ·
-    <kbd>левая</kbd> рисовать · <kbd>правая</kbd> стирать ·
-    <kbd>колесо</kbd> зум · <kbd>средняя</kbd> сдвиг · <kbd>Ctrl+Z</kbd> отмена
+    <kbd>левая</kbd> рисовать · <kbd>правая</kbd> или <kbd>средняя</kbd> сдвиг ·
+    <kbd>колесо</kbd> зум · <kbd>пробел</kbd> сдвиг · <kbd>Ctrl+Z</kbd> отмена
   </div>
 </div>
 
