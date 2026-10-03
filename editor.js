@@ -44,6 +44,7 @@ const stage = document.getElementById('stage');
 const brushWInput = document.getElementById('brushW');
 const brushUpBtn = document.getElementById('brushUp');
 const brushDownBtn = document.getElementById('brushDown');
+const panToolBtn = document.getElementById('panTool');
 const zoomInBtn = document.getElementById('zoomIn');
 const zoomOutBtn = document.getElementById('zoomOut');
 const fitBtn = document.getElementById('fitBtn');
@@ -62,6 +63,8 @@ let brush = ROAD;
 
 let viewW = 0;
 let viewH = 0;
+let viewLeft = 0;
+let viewTop = 0;
 let dpr = 1;
 let scale = 1;
 let minScale = 1;
@@ -74,6 +77,10 @@ let spaceDown = false;
 let strokeValue = FREE;
 let hover = null;
 let brushW = 1;
+// Сдвиг отдельным инструментом, а не только средней кнопкой: у многих мышей средняя кнопка
+// не нажимается нормально, а на увеличенном поле сдвинуть карту нужно постоянно.
+let tool = 'paint';
+let userZoomed = false;
 let lastX = 0;
 let lastY = 0;
 let panX = 0;
@@ -135,6 +142,7 @@ function fitScale() {
 function fit() {
   scale = fitScale();
   minScale = scale;
+  userZoomed = false;
   tx = (viewW - width * scale) / 2;
   ty = (viewH - height * scale) / 2;
 }
@@ -144,8 +152,8 @@ function resize() {
   // Размер берётся у сцены, а не у окна: сцена уже вычитает из себя панели, и поле поэтому
   // всегда помещается в видимую часть и никогда не лезет под панель.
   const box = stage.getBoundingClientRect();
-  viewW = Math.max(1, Math.round(box.width));
-  viewH = Math.max(1, Math.round(box.height));
+  viewW = Math.max(1, Math.round(stage.clientWidth));
+  viewH = Math.max(1, Math.round(stage.clientHeight));
   // Буфер канваса живёт в пикселях устройства, а его размер на странице — в CSS-пикселях. Без
   // второй строки при масштабе 125% канвас 1600 px шириной ложится в сцену 1280: поле уезжает
   // вправо и за нижний край, а попадание курсора считается в других координатах, чем рисунок.
@@ -153,9 +161,40 @@ function resize() {
   view.height = Math.round(viewH * dpr);
   view.style.width = viewW + 'px';
   view.style.height = viewH + 'px';
+  // События мыши приходят в координатах окна, а tx и ty живут в координатах канваса. После того
+  // как канвас переехал из угла окна в сцену между панелями, разница стала равна высоте панели —
+  // это и был сдвиг клика на десяток клеток вниз.
+  viewLeft = box.left;
+  viewTop = box.top;
   minScale = fitScale();
-  if (scale < minScale) fit();
+  // Поле центрируется по сцене, поэтому её размер нельзя запоминать: если сцена стала ниже, а
+  // пользователь не зумил, поле обязано вписаться заново. Прежнее условие «зум меньше минимального»
+  // этого не ловило — при уменьшении сцены старая центровка оставалась, и клик уезжал на клетки.
+  if (!userZoomed || scale < minScale) fit();
   draw();
+}
+
+// Панели меняют свою высоту уже после первой отрисовки — строка состояния наполняется числами,
+// подсказка переносится на узком окне. Если мерить сцену один раз, канвас остаётся выше её на ту
+// разницу: поле съезжает на клетку, а нижняя панель обрезается. Поэтому сцена наблюдается.
+let lastStageW = 0;
+let lastStageH = 0;
+function syncToStage() {
+  const w = Math.round(stage.clientWidth);
+  const h = Math.round(stage.clientHeight);
+  if (w === lastStageW && h === lastStageH) return;
+  lastStageW = w;
+  lastStageH = h;
+  resize();
+}
+
+// Клик и зум приходят в координатах окна, а рисуем мы в координатах канваса.
+function toCanvasX(clientX) {
+  return clientX - viewLeft;
+}
+
+function toCanvasY(clientY) {
+  return clientY - viewTop;
 }
 
 function zoomAt(px, py, target) {
@@ -164,6 +203,7 @@ function zoomAt(px, py, target) {
   const wx = (px - tx) / scale;
   const wy = (py - ty) / scale;
   scale = next;
+  if (scale > minScale + 0.001) userZoomed = true;
   tx = px - wx * scale;
   ty = py - wy * scale;
   draw();
@@ -191,6 +231,13 @@ function paint(x, y) {
       grid[row * width + col] = strokeValue;
     }
   }
+}
+
+function setTool(next) {
+  tool = next;
+  panToolBtn.setAttribute('aria-pressed', next === 'pan' ? 'true' : 'false');
+  view.style.cursor = next === 'pan' ? 'grab' : 'crosshair';
+  updateStatus();
 }
 
 function setBrushW(w) {
@@ -335,7 +382,8 @@ function readSizeInputs() {
 
 function updateStatus() {
   stCell.textContent = hover ? hover.x + ', ' + hover.y : '—';
-  stBrush.textContent = KIND_TITLE[KINDS.indexOf(brush)];
+  stBrush.textContent = tool === 'pan' ? 'Сдвиг' : KIND_TITLE[KINDS.indexOf(brush)];
+  stBrushW.textContent = tool === 'pan' ? '—' : String(brushW);
   stZoom.textContent = (scale / minScale).toFixed(2) + '×';
 }
 
@@ -439,16 +487,17 @@ async function openFile(file) {
 
 view.addEventListener('mousedown', (e) => {
   e.preventDefault();
-  if (e.button === 1 || (e.button === 0 && spaceDown)) {
+  if (e.button === 1 || (e.button === 0 && (spaceDown || tool === 'pan'))) {
     panning = true;
     panX = e.clientX;
     panY = e.clientY;
     panTX = tx;
     panTY = ty;
+    view.style.cursor = 'grabbing';
     return;
   }
   if (e.button !== 0 && e.button !== 2) return;
-  const c = cellAt(e.clientX, e.clientY);
+  const c = cellAt(toCanvasX(e.clientX), toCanvasY(e.clientY));
   if (!c) return;
   pushHistory();
   stroking = true;
@@ -468,7 +517,7 @@ window.addEventListener('mousemove', (e) => {
     draw();
     return;
   }
-  const c = cellAt(e.clientX, e.clientY);
+  const c = cellAt(toCanvasX(e.clientX), toCanvasY(e.clientY));
   const moved = !c !== !hover || (c && hover && (c.x !== hover.x || c.y !== hover.y));
   if (moved) {
     hover = c;
@@ -488,6 +537,7 @@ window.addEventListener('mousemove', (e) => {
 window.addEventListener('mouseup', () => {
   stroking = false;
   panning = false;
+  view.style.cursor = tool === 'pan' ? 'grab' : 'crosshair';
 });
 
 window.addEventListener('blur', () => {
@@ -508,7 +558,8 @@ view.addEventListener('wheel', (e) => {
   e.preventDefault();
   // Firefox отдаёт дельту колеса в строках, а не в пикселях: без поправки зум в нём втрое слабее.
   const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? viewH : 1;
-  zoomAt(e.clientX, e.clientY, scale * Math.exp(-e.deltaY * unit * 0.0015));
+  zoomAt(toCanvasX(e.clientX), toCanvasY(e.clientY), scale * Math.exp(-e.deltaY * unit * 0.0015));
+  updateStatus();
 }, { passive: false });
 
 window.addEventListener('keydown', (e) => {
@@ -516,6 +567,7 @@ window.addEventListener('keydown', (e) => {
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
   if (e.code === 'Space') {
     spaceDown = true;
+    view.style.cursor = 'grabbing';
     e.preventDefault();
     return;
   }
@@ -527,6 +579,11 @@ window.addEventListener('keydown', (e) => {
   const i = '123'.indexOf(e.key);
   if (i !== -1) {
     setBrush(KINDS[i]);
+    setTool('paint');
+    return;
+  }
+  if (e.key === '4') {
+    setTool(tool === 'pan' ? 'paint' : 'pan');
     return;
   }
   if (e.key === '0') {
@@ -541,10 +598,17 @@ window.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('keyup', (e) => {
-  if (e.code === 'Space') spaceDown = false;
+  if (e.code === 'Space') {
+    spaceDown = false;
+    if (!panning) view.style.cursor = tool === 'pan' ? 'grab' : 'crosshair';
+  }
 });
 
 window.addEventListener('resize', resize);
+
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(syncToStage).observe(stage);
+}
 
 saveBtn.addEventListener('click', save);
 openBtn.addEventListener('click', () => fileInput.click());
@@ -588,6 +652,7 @@ fitBtn.addEventListener('click', () => {
 brushWInput.addEventListener('change', () => setBrushW(parseInt(brushWInput.value, 10)));
 brushUpBtn.addEventListener('click', () => setBrushW(brushW + 1));
 brushDownBtn.addEventListener('click', () => setBrushW(brushW - 1));
+panToolBtn.addEventListener('click', () => setTool(tool === 'pan' ? 'paint' : 'pan'));
 
 fileInput.addEventListener('change', async () => {
   const file = fileInput.files && fileInput.files[0];
@@ -607,6 +672,8 @@ buildBrushes();
 fit();
 setBrush(ROAD);
 setBrushW(1);
+setTool('paint');
 syncSizeInputs();
 updateStatus();
 draw();
+syncToStage();
