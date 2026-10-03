@@ -21,9 +21,6 @@ const TAKEN = 'X'.charCodeAt(0);
 const KINDS = [FREE, ROAD, TAKEN];
 
 const C_OUTSIDE = '#0e1014';
-const C_FREE = '#d9d9d4';
-const C_ROAD = '#6b7684';
-const C_TAKEN = '#23262e';
 // Сетка рисуется на любом зуме, иначе на стартовом поле клетку не видно вовсе, а «рисовать по
 // клеткам» без видимой клетки невозможно. Два уровня: частая и через GRID_EVERY — по ней считают.
 const C_GRID = 'rgba(0,0,0,0.26)';
@@ -35,6 +32,57 @@ const C_RULER_TICK = '#4a5566';
 const C_RULER_TICK_MINOR = '#2a3140';
 const C_RULER_TEXT = '#9aa4b2';
 const GRID_EVERY = 8;
+
+// Кожа рисуется в offscreen один раз на изменение поля, а на экран выводится одним drawImage.
+// Масштаб фиксированный: зум, панорама и перерисовка без изменения поля картинку не трогают.
+// Правило 0001 «полная перерисовка дешевле миллисекунды» здесь именно поэтому не действует:
+// замерено в 0001 — 0.297 мс на ANGLE и 9.34 мс на D3D11 при 32 px на клетку, а Windows Chrome
+// выбирает D3D11.
+const SKIN_PX = 12;
+
+// Стиль — объект с числами и именем. Второй сеттинг добавляется вторым набором, а не правкой
+// первого; переключателя в интерфейсе нет и не планируется.
+const SKINS = {
+  desert: {
+    name: 'Пустыня',
+    px: SKIN_PX,
+    // Насколько неровная граница вида клетки, в долях клетки. Больше половины нельзя: петля
+    // пересекает себя там, где вид клетки шириной в одну клетку.
+    edgeAmp: 0.42,
+    // Снос тени вправо-вниз, в долях клетки. Свет на всю карту один: сверху-слева.
+    castOffset: 0.6,
+    // Гребень идёт вверх-вправо, подветренный склон — вправо-вниз. Направление одно на все
+    // барханы, иначе карта рассыпается.
+    ridge: [Math.SQRT1_2, -Math.SQRT1_2],
+    lee: [Math.SQRT1_2, Math.SQRT1_2],
+    sand: {
+      base: '#dcc59b',
+      toneA: '#e9dbba',
+      toneB: '#d3bd96',
+      toneC: '#c9b18c',
+      ripple: '#c0a479',
+      rippleLight: '#e8d7ae',
+      crack: '#ab9370',
+      pebble: '#a08767',
+      cast: 'rgba(126, 96, 58, 0.32)'
+    },
+    road: {
+      base: '#b8ab98',
+      rut: '#d2c6b2',
+      pebble: '#a1938a',
+      curbDark: '#7f7466',
+      curbLight: '#c3b7a3',
+      cast: 'rgba(78, 76, 74, 0.36)'
+    },
+    dune: {
+      base: '#e2cfa4',
+      shadow: '#cdb387',
+      deep: '#b89a6e',
+      crest: '#f2e6c8'
+    }
+  }
+};
+const SKIN = SKINS.desert;
 
 const view = document.getElementById('view');
 const ctx = view.getContext('2d');
@@ -104,6 +152,23 @@ let panTX = 0;
 let panTY = 0;
 let history = [];
 
+// Сетка по клавише и по умолчанию включена: без неё рисовать по клеткам нельзя, но поверх
+// оформленной карты она превращает всё в шахматку, поэтому выключатель обязателен. Линейки
+// с номерами остаются всегда — координата нужна независимо от сетки.
+let showGrid = true;
+
+const skin = document.createElement('canvas');
+const skinCtx = skin.getContext('2d');
+// Песок от поля не зависит: пятна, полосы и камешки стоят на мировых координатах. Он рисуется
+// один раз в свою карту, и дальше кожа только копирует её. Это и есть главный выигрыш: слой
+// песка — около двухсот вызовов канваса, и на перерисовке кожи он стоил 60 мс из 64.
+const sandBase = document.createElement('canvas');
+const sandCtx = sandBase.getContext('2d');
+let sandPainted = false;
+let skinDirty = true;
+let sandGrads = null;
+let pebblePat = null;
+
 // Uint8Array забит нулями, а ноль — не «.», поэтому поле заполняется явно.
 function newField(w, h) {
   const field = new Uint8Array(w * h);
@@ -111,10 +176,12 @@ function newField(w, h) {
   return field;
 }
 
+// Образец кисти берёт базу того же вида клетки, что и кожа: серый квадрат рядом с оформленной
+// картой читается как чужой элемент, а не как инструмент.
 function colorOf(code) {
-  if (code === ROAD) return C_ROAD;
-  if (code === TAKEN) return C_TAKEN;
-  return C_FREE;
+  if (code === ROAD) return SKIN.road.base;
+  if (code === TAKEN) return SKIN.dune.base;
+  return SKIN.sand.base;
 }
 
 function buildBrushes() {
@@ -251,6 +318,9 @@ function paint(x, y) {
   // целиком вправо и вниз — иначе линия полосы уезжает на полклетки от края до края.
   const before = Math.floor((brushW - 1) / 2);
   const after = brushW - 1 - before;
+  // Кожа помечается грязной здесь, а не в вызывающем коде: paint() — единственное место, где
+  // клетка меняет вид, и забытая пометка дала бы карту, которая не соответствует файлу.
+  skinDirty = true;
   for (let dy = -before; dy <= after; dy++) {
     const row = y + dy;
     if (row < 0 || row >= height) continue;
@@ -292,60 +362,593 @@ function strokeLine(x0, y0, x1, y1) {
   }
 }
 
-function draw() {
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = C_OUTSIDE;
-  ctx.fillRect(0, 0, viewW, viewH);
+// Хэш координат клетки — единственный источник случайности на карте. Math.random здесь не
+// годится: у случайного числа нет координат, поэтому одна и та же карта выглядела бы по-разному
+// при каждом кадре и шевелилась бы.
+function hash2(x, y, salt) {
+  let h = Math.imul(x | 0, 0x27d4eb2f) ^ Math.imul(y | 0, 0x165667b1) ^ Math.imul(salt | 0, 0x9e3779b1);
+  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+  h = Math.imul(h ^ (h >>> 13), 0x297a2d39);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
 
-  // Границы клеток округляются до целых пикселей: у соседних клеток граница общая, поэтому
-  // между ними не остаётся антиалиасингового шва, который на мелком зуме выглядит сеткой.
-  for (let y = 0; y < height; y++) {
-    const row = y * width;
-    const py = Math.round(ty + y * scale);
-    const ph = Math.round(ty + (y + 1) * scale) - py;
-    for (let x = 0; x < width; x++) {
-      ctx.fillStyle = colorOf(grid[row + x]);
-      const px = Math.round(tx + x * scale);
-      ctx.fillRect(px, py, Math.round(tx + (x + 1) * scale) - px, ph);
+// Петли границы региона и список рёбер. Рёбра нужны бордюру: камешек ставится на своё ребро, а
+// не вдоль пути, иначе рисунок зависел бы от порядка обхода петель, который меняется от
+// правки одной клетки. Рёбра обходятся так, что область всегда справа, поэтому внешний контур и
+// дырки выходят противоположной ориентации и заливка ненулевой вычитает дырки сама. Дырка у
+// дороги — это песок внутри кольца, и без этого он был бы залит дорогой.
+function regionLoops(pred, box) {
+  const x0 = box.x0;
+  const y0 = box.y0;
+  const vw = box.x1 - x0 + 2;
+  const head = new Int32Array(vw * (box.y1 - y0 + 2)).fill(-1);
+  const to = [];
+  const next = [];
+  const edges = [];
+  const edge = (ax, ay, bx, by) => {
+    const v = (ay - y0) * vw + (ax - x0);
+    edges.push(ax, ay, bx, by);
+    to.push((by - y0) * vw + (bx - x0));
+    next.push(head[v]);
+    head[v] = to.length - 1;
+  };
+  for (let y = y0; y <= box.y1; y++) {
+    for (let x = x0; x <= box.x1; x++) {
+      if (!pred(x, y)) continue;
+      if (y === y0 || !pred(x, y - 1)) edge(x, y, x + 1, y);
+      if (x === box.x1 || !pred(x + 1, y)) edge(x + 1, y, x + 1, y + 1);
+      if (y === box.y1 || !pred(x, y + 1)) edge(x + 1, y + 1, x, y + 1);
+      if (x === x0 || !pred(x - 1, y)) edge(x, y + 1, x, y);
     }
   }
+  const used = new Uint8Array(to.length);
+  const open = (v) => {
+    let e = head[v];
+    while (e !== -1 && used[e]) e = next[e];
+    return e;
+  };
+  const loops = [];
+  for (let v = 0; v < head.length; v++) {
+    if (open(v) === -1) continue;
+    const loop = [];
+    let cur = v;
+    for (;;) {
+      loop.push((cur % vw) + x0, ((cur / vw) | 0) + y0);
+      const e = open(cur);
+      if (e === -1) break;
+      used[e] = 1;
+      cur = to[e];
+    }
+    loops.push(loop);
+  }
+  return { loops: loops, edges: edges };
+}
 
-  // Сетка всегда, а не от 10 пикселей на клетку: на стартовом зуме клетка 7 пикселей, и без
-  // линий поле выглядит пустым квадратом, в котором не видно, куда попадёт клик.
+// Прямая линия по клеткам — это и есть причина, по которой карта читается как таблица. Каждое
+// единичное ребро границы заменяется ломаной: три точки на ребро, каждая сдвинута наружу по
+// нормали на долю клетки из хэша. Сдвиг только по нормали и меньше половины клетки — иначе петля
+// пересекает себя там, где вид клетки шириной в одну клетку.
+function jitterPath(loops, amp) {
+  const S = SKIN.px;
+  const p = new Path2D();
+  for (const loop of loops) {
+    const n = loop.length / 2;
+    for (let i = 0; i < n; i++) {
+      const ax = loop[i * 2];
+      const ay = loop[i * 2 + 1];
+      const j = i + 1 === n ? 0 : i + 1;
+      const bx = loop[j * 2];
+      const by = loop[j * 2 + 1];
+      const nx = by - ay;
+      const ny = ax - bx;
+      if (i === 0) p.moveTo(ax * S, ay * S);
+      for (let t = 1; t <= 3; t++) {
+        const f = t / 4;
+        const h = hash2(t, ax * 4 + ay, 7) * 2 - 1;
+        const k = h * amp * (0.35 + 0.65 * hash2(ax, ay, 8));
+        p.lineTo((ax + (bx - ax) * f + nx * k) * S, (ay + (by - ay) * f + ny * k) * S);
+      }
+      p.lineTo(bx * S, by * S);
+    }
+    p.closePath();
+  }
+  return p;
+}
+
+// Волна гребня считается от индекса вдоль линии, а не от координат точки. От координат линии
+// получались разными при параллельном сдвиге, и граница света и граница глубины тени
+// пересекались ромбом. Волна длиной в две клетки: короче — шум, длиннее — складка.
+function waveAt(i, salt) {
+  const S = SKIN.px;
+  return (hash2(Math.round(i / 2), salt, 23) - 0.5) * 0.44 * S;
+}
+
+// Подветренная половина бархана. Это четырёхугольник: две стороны параллельны гребню, две
+// уходят по нормали далеко за поле. Первый вариант вёл от края по нормали и обратно — путь
+// пересекал сам себя и заливал два клинья вместо полуплоскости. Лишнее срезает clip по контуру.
+function leePlane(px, py, R, salt) {
+  const d = SKIN.ridge;
+  const n = SKIN.lee;
+  const step = SKIN.px;
+  const k = Math.ceil(R / step);
+  const p = new Path2D();
+  p.moveTo(px - d[0] * R, py - d[1] * R);
+  p.lineTo(px + n[0] * R - d[0] * R, py + n[1] * R - d[1] * R);
+  p.lineTo(px + n[0] * R + d[0] * R, py + n[1] * R + d[1] * R);
+  p.lineTo(px + d[0] * R, py + d[1] * R);
+  for (let i = k; i >= -k; i--) {
+    const w = waveAt(i, salt);
+    p.lineTo(px + d[0] * i * step + d[1] * w, py + d[1] * i * step - d[0] * w);
+  }
+  p.closePath();
+  return p;
+}
+
+function ridgeLine(c, px, py, R, salt) {
+  const d = SKIN.ridge;
+  const step = SKIN.px;
+  const k = Math.ceil(R / step);
+  c.beginPath();
+  for (let i = -k; i <= k; i++) {
+    const w = waveAt(i, salt);
+    const x = px + d[0] * i * step + d[1] * w;
+    const y = py + d[1] * i * step - d[0] * w;
+    if (i === -k) c.moveTo(x, y);
+    else c.lineTo(x, y);
+  }
+  c.stroke();
+}
+
+// Связные области одного вида клетки: у каждой свой контур и своя диагональ света и тени.
+function componentsOf(kind) {
+  const labels = new Int32Array(width * height).fill(-1);
+  const groups = [];
+  const stack = [];
+  for (let i = 0; i < grid.length; i++) {
+    if (grid[i] !== kind || labels[i] !== -1) continue;
+    const id = groups.length;
+    const g = { cells: [], x0: width, y0: height, x1: -1, y1: -1 };
+    groups.push(g);
+    labels[i] = id;
+    stack.length = 0;
+    stack.push(i);
+    while (stack.length) {
+      const c = stack.pop();
+      g.cells.push(c);
+      const cx = c % width;
+      const cy = (c / width) | 0;
+      if (cx < g.x0) g.x0 = cx;
+      if (cx > g.x1) g.x1 = cx;
+      if (cy < g.y0) g.y0 = cy;
+      if (cy > g.y1) g.y1 = cy;
+      if (cx > 0 && grid[c - 1] === kind && labels[c - 1] === -1) { labels[c - 1] = id; stack.push(c - 1); }
+      if (cx < width - 1 && grid[c + 1] === kind && labels[c + 1] === -1) { labels[c + 1] = id; stack.push(c + 1); }
+      if (cy > 0 && grid[c - width] === kind && labels[c - width] === -1) { labels[c - width] = id; stack.push(c - width); }
+      if (cy < height - 1 && grid[c + width] === kind && labels[c + width] === -1) { labels[c + width] = id; stack.push(c + width); }
+    }
+  }
+  return groups;
+}
+
+function maskOf(cells) {
+  const mask = new Uint8Array(width * height);
+  for (let i = 0; i < cells.length; i++) mask[cells[i]] = 1;
+  return mask;
+}
+
+function pathOfMask(mask, box) {
+  return jitterPath(regionLoops((x, y) => mask[y * width + x] === 1, box).loops, SKIN.edgeAmp);
+}
+
+// Бордюр из крупных камней по краям полотна. Камень ставится на каждое единичное ребро границы и
+// собирается в один путь: два вызова заливки на всю кромку вместо тысячи отдельных. Размер,
+// наклон и сдвиг вдоль ребра берутся из хэша — одинаковые квадраты читаются как пунктир, а не
+// как камни. Светлая половина сдвинута вверх-влево, по солнцу.
+function curbPath(edges, inset, scale) {
+  const S = SKIN.px;
+  const p = new Path2D();
+  for (let i = 0; i < edges.length; i += 4) {
+    const ax = edges[i];
+    const ay = edges[i + 1];
+    const bx = edges[i + 2];
+    const by = edges[i + 3];
+    const h0 = hash2(ax, ay, 61);
+    const h1 = hash2(ax, ay, 62);
+    const h2 = hash2(ax, ay, 63);
+    const r = (0.2 + h0 * 0.3) * S * scale;
+    const along = (h1 - 0.5) * 0.36;
+    const ang = (h2 - 0.5) * 1.3;
+    const ca = Math.cos(ang);
+    const sa = Math.sin(ang);
+    const dx = (bx - ax) * ca - (by - ay) * sa;
+    const dy = (bx - ax) * sa + (by - ay) * ca;
+    const mx = ((ax + bx) / 2 + (bx - ax) * along - (by - ay) * inset) * S;
+    const my = ((ay + by) / 2 + (by - ay) * along + (ax - bx) * inset) * S;
+    const tx = dx * r;
+    const ty = dy * r;
+    const nx = -dy * r * 0.82;
+    const ny = dx * r * 0.82;
+    p.moveTo(mx + tx + nx, my + ty + ny);
+    p.lineTo(mx - tx + nx, my - ty + ny);
+    p.lineTo(mx - tx - nx, my - ty - ny);
+    p.lineTo(mx + tx - nx, my + ty - ny);
+    p.closePath();
+  }
+  return p;
+}
+
+function sandGradsFor(c) {
+  if (sandGrads === null) {
+    const tones = [SKIN.sand.toneA, SKIN.sand.toneB, SKIN.sand.toneC];
+    sandGrads = tones.map((tone) => {
+      const g = c.createRadialGradient(0, 0, 0, 0, 0, 1);
+      g.addColorStop(0, tone);
+      g.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      return g;
+    });
+  }
+  return sandGrads;
+}
+
+function paintSand(c, W, H) {
+  const S = SKIN.px;
+  const D = SKIN.sand;
+  c.fillStyle = D.base;
+  c.fillRect(0, 0, W, H);
+
+  // Пятна трёх тонов: ровная заливка читается как фон, а не как песок. Градиент строится один
+  // раз на тон и растягивается преобразованием — новый на каждое пятно дороже в разы. Пятно
+  // должно быть пятном, а не тёмным облаком: их больше, они мельче и вдвое светлее базы, иначе
+  // песок выглядит испачканным.
+  const grads = sandGradsFor(c);
+  for (let i = 0; i < 34; i++) {
+    const cx = hash2(i, 1, 11) * (W + 24 * S) - 12 * S;
+    const cy = hash2(i, 2, 12) * (H + 24 * S) - 12 * S;
+    const rx = (2.6 + hash2(i, 3, 13) * 4.2) * S;
+    c.save();
+    c.translate(cx, cy);
+    c.rotate((hash2(i, 5, 15) - 0.5) * 0.7);
+    c.scale(rx, rx * (0.16 + hash2(i, 4, 14) * 0.26));
+    c.globalAlpha = i % 4 === 3 ? 0.13 : 0.17;
+    c.fillStyle = grads[i % 3];
+    c.fillRect(-1, -1, 2, 2);
+    c.restore();
+  }
+  c.globalAlpha = 1;
+
+  // Ветровые полосы: одно направление на всю карту, низкий контраст, тот же наклон, что у
+  // гребня. На мелком зуме именно они, а не пятна, дают направление и масштаб. Полосы идут через
+  // всё поле, поэтому их число — это и есть цена слоя: чаще клетки не надо.
+  c.lineWidth = Math.max(1, S * 0.09);
+  for (let k = -2; k * 2.2 * S < H + W; k++) {
+    const y0 = k * 2.2 * S;
+    c.beginPath();
+    for (let s = -1; s * 1.6 <= W / S + 1.6; s++) {
+      const x = s * 1.6 * S;
+      const y = y0 - x * 0.3 + (hash2(s, k, 17) - 0.5) * 0.55 * S;
+      if (s === -1) c.moveTo(x, y);
+      else c.lineTo(x, y);
+    }
+    c.strokeStyle = (k & 1) === 0 ? SKIN.sand.rippleLight : SKIN.sand.ripple;
+    c.globalAlpha = (k & 1) === 0 ? 0.13 : 0.1;
+    c.stroke();
+  }
+  c.globalAlpha = 1;
+
+  // Трещины и редкие камешки — текстура, а не рисунок: их почти не видно, но без них песок
+  // выглядит листом бумаги.
+  c.strokeStyle = SKIN.sand.crack;
+  c.globalAlpha = 0.22;
+  c.lineWidth = Math.max(1, S * 0.09);
+  for (let i = 0; i < 26; i++) {
+    let x = hash2(i, 21, 31) * W;
+    let y = hash2(i, 22, 32) * H;
+    c.beginPath();
+    c.moveTo(x, y);
+    for (let s = 0; s < 4; s++) {
+      x += (hash2(i, s, 33) - 0.5) * 2.6 * S;
+      y += (hash2(i, s, 34) - 0.5) * 2.6 * S;
+      c.lineTo(x, y);
+    }
+    c.stroke();
+  }
+  c.fillStyle = SKIN.sand.pebble;
+  c.globalAlpha = 0.26;
+  for (let i = 0; i < 150; i++) {
+    const x = hash2(i, 51, 41) * W;
+    const y = hash2(i, 52, 42) * H;
+    const r = 0.5 + hash2(i, 53, 43) * 0.9;
+    c.beginPath();
+    c.ellipse(x, y, r, r * 0.72, 0, 0, Math.PI * 2);
+    c.fill();
+  }
+  c.globalAlpha = 1;
+}
+
+function paintDunes(c) {
+  const S = SKIN.px;
+  const D = SKIN.dune;
+  const groups = componentsOf(TAKEN);
+  if (groups.length === 0) return;
+  const masks = groups.map((g) => maskOf(g.cells));
+  // Тень бархана ложится на песок справа-вниз и рисуется до тела: тело её накрывает.
+  const cast = new Path2D();
+  const shift = new DOMMatrix().translate(SKIN.castOffset * S, SKIN.castOffset * S);
+  for (let i = 0; i < groups.length; i++) cast.addPath(pathOfMask(masks[i], groups[i]), shift);
+  c.fillStyle = SKIN.sand.cast;
+  c.fill(cast);
+
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    const path = pathOfMask(masks[i], g);
+    // Линии гребня идут на ширину блока, а не на ширину поля. На ширине поля это квадрат
+    // 4608 на 4608 пикселей и тринадцать штрихов длиной 4608 на каждый блок: растеризация
+    // уходила в десятки миллисекунд, и карта не рисовалась.
+    const reach = (Math.max(g.x1 - g.x0, g.y1 - g.y0) + 6) * S;
+    c.fillStyle = D.base;
+    c.fill(path);
+    c.save();
+    c.clip(path);
+    // Наветренный пологий склон — это база, подветренный крутой заливается тенью. Граница между
+    // ними одна на весь блок, и блоков много, но направление у всех одно. Сдвиг берётся от
+    // меньшей стороны блока: от большей граница уезжала за его пределы и блок становился
+    // весь освещённым или весь в тени.
+    const short = Math.min(g.x1 - g.x0, g.y1 - g.y0);
+    const t = (hash2(g.x0, g.y0, 21) - 0.5) * (short + 2) * S * 0.3;
+    const px = ((g.x0 + g.x1) / 2) * S + SKIN.lee[0] * t;
+    const py = ((g.y0 + g.y1) / 2) * S + SKIN.lee[1] * t;
+    // Соль одна на весь блок: иначе параллельные линии блока получают разную волну.
+    const salt = g.x0 * 131 + g.y0;
+    c.fillStyle = D.shadow;
+    c.fill(leePlane(px, py, reach, salt));
+    // Склон не плоский: чем дальше от гребня, тем темнее. Вторая такая же заливка давала второй
+    // жёсткий край, а он с первым пересекался ромбом; градиент поперёк склона мягче и дешевле.
+    // Первый стоп прозрачный обязателен: градиент по краям держит цвет стопа, и без этого весь
+    // наветренный склон заливался глубиной тени.
+    const grad = c.createLinearGradient(px, py, px + SKIN.lee[0] * 4 * S, py + SKIN.lee[1] * 4 * S);
+    grad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    grad.addColorStop(0.15, D.deep);
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    c.fillStyle = grad;
+    c.fillRect(g.x0 * S - 2 * S, g.y0 * S - 2 * S, (g.x1 - g.x0 + 5) * S, (g.y1 - g.y0 + 5) * S);
+    c.strokeStyle = D.crest;
+    c.lineWidth = Math.max(1, S * 0.08);
+    ridgeLine(c, px, py, reach, salt);
+    // Вторичные гребни того же направления по обе стороны от главного: без них наветренный
+    // склон остаётся ровной заливкой, а блок читается как картон.
+    if (g.x1 - g.x0 >= 3 && g.y1 - g.y0 >= 3) {
+      c.strokeStyle = D.shadow;
+      c.lineWidth = Math.max(1.5, S * 0.45);
+      c.globalAlpha = 0.24;
+      for (let k = -3; k <= 3; k++) {
+        if (k === 0) continue;
+        ridgeLine(c, px + SKIN.lee[0] * k * 1.8 * S, py + SKIN.lee[1] * k * 1.8 * S, reach, salt);
+      }
+      c.strokeStyle = D.crest;
+      c.lineWidth = Math.max(1, S * 0.07);
+      c.globalAlpha = 0.3;
+      for (let k = -3; k <= 3; k++) {
+        if (k === 0) continue;
+        ridgeLine(c, px + SKIN.lee[0] * (k * 1.8 - 0.3) * S, py + SKIN.lee[1] * (k * 1.8 - 0.3) * S, reach, salt);
+      }
+      c.globalAlpha = 1;
+    }
+    c.restore();
+  }
+}
+
+// Плитка камешков рисуется примитивами один раз и повторяется заливкой. Обход границы дороги с
+// камешком на каждый сантиметр кромки дороже на порядок, а выглядит так же.
+function pebblePattern(c) {
+  if (pebblePat === null) {
+    const t = document.createElement('canvas');
+    const T = 6 * SKIN.px;
+    t.width = T;
+    t.height = T;
+    const tc = t.getContext('2d');
+    // Два тона: одноцветные камешки читаются как грязь, а два тона — как гравий.
+    for (let i = 0; i < 110; i++) {
+      const x = hash2(i, 41, 1) * T;
+      const y = hash2(i, 42, 2) * T;
+      const r = 0.5 + hash2(i, 43, 3) * 1.1;
+      tc.fillStyle = (i & 1) === 0 ? SKIN.road.pebble : SKIN.road.curbLight;
+      // Камешек у края плитки дорисовывается с другой стороны, иначе шов видно.
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          if (ox !== 0 && x + ox * T > -r && x + ox * T < T + r) continue;
+          if (oy !== 0 && y + oy * T > -r && y + oy * T < T + r) continue;
+          tc.beginPath();
+          tc.ellipse(x + ox * T, y + oy * T, r, r * 0.78, 0, 0, Math.PI * 2);
+          tc.fill();
+        }
+      }
+    }
+    pebblePat = c.createPattern(t, 'repeat');
+  }
+  return pebblePat;
+}
+
+// Две светлые колеи вдоль полотна. Считаются по полосам, а не по каждой строке: иначе у
+// четырёхклетковой дороги получается восемь линий вместо двух.
+function paintRuts(c) {
+  const S = SKIN.px;
+  const t = Math.max(1, S * 0.14);
+  c.fillStyle = SKIN.road.rut;
+  c.globalAlpha = 0.5;
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      if (grid[row + x] !== ROAD) continue;
+      let e = x;
+      while (e < width && grid[row + e] === ROAD) e++;
+      const len = e - x;
+      if (len >= 3 && !(y > 0 && grid[row - width + x] === ROAD)) {
+        let a = y;
+        let b = y;
+        while (a > 0 && grid[(a - 1) * width + x] === ROAD) a--;
+        while (b < height - 1 && grid[(b + 1) * width + x] === ROAD) b++;
+        const h = (b - a + 1) * S;
+        c.fillRect((x + 1) * S, a * S + h * 0.28, (len - 2) * S, t);
+        c.fillRect((x + 1) * S, a * S + h * 0.66, (len - 2) * S, t);
+      }
+      x = e - 1;
+    }
+  }
+  for (let x = 0; x < width; x++) {
+    for (let y = 0; y < height; y++) {
+      if (grid[y * width + x] !== ROAD) continue;
+      let e = y;
+      while (e < height && grid[e * width + x] === ROAD) e++;
+      const len = e - y;
+      if (len >= 3 && !(x > 0 && grid[y * width + x - 1] === ROAD)) {
+        let a = x;
+        let b = x;
+        while (a > 0 && grid[y * width + a - 1] === ROAD) a--;
+        while (b < width - 1 && grid[y * width + b + 1] === ROAD) b++;
+        const w = (b - a + 1) * S;
+        c.fillRect(a * S + w * 0.28, (y + 1) * S, t, (len - 2) * S);
+        c.fillRect(a * S + w * 0.66, (y + 1) * S, t, (len - 2) * S);
+      }
+      y = e - 1;
+    }
+  }
+  c.globalAlpha = 1;
+}
+
+function paintRoad(c) {
+  const S = SKIN.px;
+  const R = SKIN.road;
+  let x0 = width;
+  let y0 = height;
+  let x1 = -1;
+  let y1 = -1;
+  for (let i = 0; i < grid.length; i++) {
+    if (grid[i] !== ROAD) continue;
+    const cx = i % width;
+    const cy = (i / width) | 0;
+    if (cx < x0) x0 = cx;
+    if (cx > x1) x1 = cx;
+    if (cy < y0) y0 = cy;
+    if (cy > y1) y1 = cy;
+  }
+  if (x1 < 0) return;
+  const region = regionLoops((x, y) => grid[y * width + x] === ROAD, { x0: x0, y0: y0, x1: x1, y1: y1 });
+  const path = jitterPath(region.loops, SKIN.edgeAmp);
+  // Насыпная дорога приподнята, а приподнятость на плоскости держится только тенью: сдвинутая
+  // вправо-вниз копия полотна оставляет тень по всей наружной кромке.
+  const cast = new Path2D();
+  cast.addPath(path, new DOMMatrix().translate(SKIN.castOffset * S, SKIN.castOffset * S));
+  c.fillStyle = R.cast;
+  c.fill(cast);
+  c.fillStyle = R.base;
+  c.fill(path);
+  // Заливка по самому пути уже ограничена дорогой, поэтому clip для неё лишний: клип по
+  // пути из сотен петель дорог и рисуется целиком в буфер маски. Он нужен только колеям.
+  c.fillStyle = pebblePattern(c);
+  c.globalAlpha = 0.62;
+  c.fill(path);
+  c.globalAlpha = 1;
+  c.save();
+  c.clip(path);
+  paintRuts(c);
+  c.restore();
+  // Бордюр из крупных камней по краям: тёмный камень и светлая его половина. Пунктир по пути не
+  // годится: его начало зависит от порядка обхода петель, и правка одной клетки сдвигала бы
+  // весь бордюр вдоль кольца.
+  c.fillStyle = R.curbDark;
+  c.fill(curbPath(region.edges, 0, 1));
+  c.fillStyle = R.curbLight;
+  c.fill(curbPath(region.edges, -0.42, 0.78));
+}
+
+function rebuildSkin() {
+  const S = SKIN.px;
+  const W = width * S;
+  const H = height * S;
+  if (skin.width !== W || skin.height !== H) {
+    skin.width = W;
+    skin.height = H;
+    sandBase.width = W;
+    sandBase.height = H;
+    sandPainted = false;
+    pebblePat = null;
+    sandGrads = null;
+  }
+  if (!sandPainted) {
+    sandCtx.setTransform(1, 0, 0, 1, 0, 0);
+    sandCtx.clearRect(0, 0, W, H);
+    paintSand(sandCtx, W, H);
+    sandPainted = true;
+  }
+  const c = skinCtx;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.globalAlpha = 1;
+  c.globalCompositeOperation = 'source-over';
+  c.setLineDash([]);
+  c.lineCap = 'round';
+  c.lineJoin = 'round';
+  c.clearRect(0, 0, W, H);
+  c.drawImage(sandBase, 0, 0);
+  paintDunes(c);
+  paintRoad(c);
+  skinDirty = false;
+}
+
+function draw() {
+  if (skinDirty) rebuildSkin();
+  // Фон заливается на весь буфер, а не на размер вёрстки: при дробном devicePixelRatio буфер
+  // шире на доли пикселя, и незакрашенная полоска в нём хранила то, что было в кадре раньше.
+  // Из-за этого снимок после перерисовки отличался от первого на доли процента пикселей.
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = C_OUTSIDE;
+  ctx.fillRect(0, 0, view.width, view.height);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // Кожа выводится одним drawImage с трансформом камеры. Сглаживание включено обязательно: при
+  // вписывании 96 × 96 это 12 пикселей на клетку против 7, и без усреднения текстура рябит.
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'low';
+  ctx.drawImage(skin, tx, ty, width * scale, height * scale);
+
   const x0 = Math.round(tx);
   const y0 = Math.round(ty);
   const x1 = Math.round(tx + width * scale);
   const y1 = Math.round(ty + height * scale);
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let x = 1; x < width; x++) {
-    if (x % GRID_EVERY === 0) continue;
-    const px = Math.round(tx + x * scale) + 0.5;
-    ctx.moveTo(px, y0);
-    ctx.lineTo(px, y1);
-  }
-  for (let y = 1; y < height; y++) {
-    if (y % GRID_EVERY === 0) continue;
-    const py = Math.round(ty + y * scale) + 0.5;
-    ctx.moveTo(x0, py);
-    ctx.lineTo(x1, py);
-  }
-  ctx.strokeStyle = C_GRID;
-  ctx.stroke();
 
-  ctx.beginPath();
-  for (let x = GRID_EVERY; x < width; x += GRID_EVERY) {
-    const px = Math.round(tx + x * scale) + 0.5;
-    ctx.moveTo(px, y0);
-    ctx.lineTo(px, y1);
+  if (showGrid) {
+    // Сетка всегда, а не от 10 пикселей на клетку: на стартовом зуме клетка 7 пикселей, и без
+    // линий поле выглядит пустым квадратом, в котором не видно, куда попадёт клик.
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 1; x < width; x++) {
+      if (x % GRID_EVERY === 0) continue;
+      const px = Math.round(tx + x * scale) + 0.5;
+      ctx.moveTo(px, y0);
+      ctx.lineTo(px, y1);
+    }
+    for (let y = 1; y < height; y++) {
+      if (y % GRID_EVERY === 0) continue;
+      const py = Math.round(ty + y * scale) + 0.5;
+      ctx.moveTo(x0, py);
+      ctx.lineTo(x1, py);
+    }
+    ctx.strokeStyle = C_GRID;
+    ctx.stroke();
+
+    ctx.beginPath();
+    for (let x = GRID_EVERY; x < width; x += GRID_EVERY) {
+      const px = Math.round(tx + x * scale) + 0.5;
+      ctx.moveTo(px, y0);
+      ctx.lineTo(px, y1);
+    }
+    for (let y = GRID_EVERY; y < height; y += GRID_EVERY) {
+      const py = Math.round(ty + y * scale) + 0.5;
+      ctx.moveTo(x0, py);
+      ctx.lineTo(x1, py);
+    }
+    ctx.strokeStyle = C_GRID_MAJOR;
+    ctx.stroke();
   }
-  for (let y = GRID_EVERY; y < height; y += GRID_EVERY) {
-    const py = Math.round(ty + y * scale) + 0.5;
-    ctx.moveTo(x0, py);
-    ctx.lineTo(x1, py);
-  }
-  ctx.strokeStyle = C_GRID_MAJOR;
-  ctx.stroke();
 
   // Рамка показывает не клетку под курсором, а тот квадрат, который будет закрашен: при кисти 8
   // одна клетка вводит в заблуждение и рисуешь вслепую.
@@ -455,6 +1058,7 @@ function resizeField(w, h) {
   height = h;
   grid = next;
   hover = null;
+  skinDirty = true;
   syncSizeInputs();
   fit();
   draw();
@@ -486,6 +1090,7 @@ function updateStatus() {
 function undo() {
   if (history.length === 0) return;
   grid = history.pop();
+  skinDirty = true;
   draw();
 }
 
@@ -573,6 +1178,7 @@ async function openFile(file) {
   grid = map.grid;
   history = [];
   hover = null;
+  skinDirty = true;
   nameInput.value = map.name;
   presetSel.value = (width === height && PRESETS.has(width + 'x' + height)) ? width + 'x' + height : 'custom';
   syncSizeInputs();
@@ -684,6 +1290,13 @@ window.addEventListener('keydown', (e) => {
     setTool(tool === 'pan' ? 'paint' : 'pan');
     return;
   }
+  // Сетка обязана выключаться: поверх оформленной карты она превращает всё в шахматку.
+  // Линейки с номерами остаются в любом состоянии — координата нужна всегда.
+  if (e.key === '5') {
+    showGrid = !showGrid;
+    draw();
+    return;
+  }
   if (e.key === '0') {
     fit();
     draw();
@@ -765,6 +1378,7 @@ fileInput.addEventListener('change', async () => {
 
 // Значки кнопок задают высоту панели, поэтому подгонка камеры идёт после них; devicePixelRatio
 // известен только после resize(), а значки рисуются в его масштабе.
+skinDirty = true;
 resize();
 buildBrushes();
 fit();
